@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GPS 日志解析工具</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Microsoft YaHei', 'Segoe UI', sans-serif; background: #1a1a2e; color: #e0e0e0; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+
+  .toolbar {
+    background: #16213e; padding: 12px 20px; display: flex; align-items: center; gap: 16px;
+    border-bottom: 1px solid #0f3460; flex-shrink: 0; height: 48px;
+  }
+  .toolbar h1 { font-size: 18px; color: #e94560; margin-right: 20px; white-space: nowrap; }
+  .btn {
+    background: #0f3460; color: #e0e0e0; border: 1px solid #533483; padding: 8px 18px;
+    border-radius: 6px; cursor: pointer; font-size: 14px; transition: all 0.2s;
+  }
+  .btn:hover { background: #533483; }
+  .file-input { display: none; }
+  .file-name { color: #a0a0a0; font-size: 13px; }
+  .stats { margin-left: auto; font-size: 13px; color: #a0a0a0; }
+  .stats span { color: #e94560; font-weight: bold; }
+
+  .main { display: flex; flex: 1; overflow: hidden; }
+
+  .map-panel { flex: 1; position: relative; }
+  #map { width: 100%; height: 100%; }
+
+  .side-panel {
+    width: 420px; background: #16213e; border-left: 1px solid #0f3460;
+    display: flex; flex-direction: column; flex-shrink: 0;
+  }
+  .panel-tabs {
+    display: flex; border-bottom: 1px solid #0f3460; flex-shrink: 0; height: 40px;
+  }
+  .panel-tab {
+    flex: 1; line-height: 40px; text-align: center; cursor: pointer;
+    font-size: 13px; color: #a0a0a0; border-bottom: 2px solid transparent;
+    transition: all 0.2s; user-select: none;
+  }
+  .panel-tab:hover { color: #e0e0e0; }
+  .panel-tab.active { color: #e94560; border-bottom-color: #e94560; }
+
+  #tabContent {
+    flex: 1; min-height: 0; overflow: hidden;
+    display: flex; flex-direction: column;
+  }
+
+  .panel-view {
+    flex: 1; min-height: 0; overflow-y: auto;
+  }
+  .panel-view::-webkit-scrollbar { width: 6px; }
+  .panel-view::-webkit-scrollbar-thumb { background: #533483; border-radius: 3px; }
+
+  .empty-view {
+    flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    color: #555; gap: 12px;
+    border: 2px dashed #333; border-radius: 12px; margin: 16px;
+    transition: border-color 0.2s;
+  }
+  .empty-view .icon { font-size: 48px; }
+  .empty-view p { font-size: 14px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th {
+    background: #0f3460; color: #e94560; padding: 8px 6px; text-align: left;
+    position: sticky; top: 0; z-index: 1;
+  }
+  td { padding: 6px; border-bottom: 1px solid #1a1a3e; }
+  tr:hover td { background: #1a1a3e; }
+  .status-valid { color: #4ecca3; }
+  .status-invalid { color: #e94560; }
+
+  .info-content { padding: 16px; font-size: 13px; line-height: 2; }
+  .info-content .label { color: #a0a0a0; }
+  .info-content .value { color: #e94560; font-weight: bold; }
+
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+  <h1>GPS Logger</h1>
+  <button class="btn" onclick="document.getElementById('fileInput').click()">导入 gpslog.dat</button>
+  <input type="file" id="fileInput" class="file-input" accept=".dat,.bin" onchange="handleFile(this.files[0])">
+  <button class="btn" id="btnClear" onclick="clearData()" style="display:none">清除</button>
+  <span class="file-name" id="fileName"></span>
+  <div class="stats" id="stats"></div>
+</div>
+
+<div class="main">
+  <div class="map-panel" id="mapPanel">
+    <div id="map"></div>
+  </div>
+  <div class="side-panel">
+    <div class="panel-tabs">
+      <div class="panel-tab active" data-tab="table" onclick="switchTab('table')">数据记录</div>
+      <div class="panel-tab" data-tab="info" onclick="switchTab('info')">统计信息</div>
+    </div>
+    <div id="tabContent">
+      <div class="empty-view" id="emptyView">
+        <div class="icon">📂</div>
+        <p>点击上方按钮导入 gpslog.dat 文件开始解析</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+let map, trackLine, markers = [];
+let records = [];
+let currentTab = 'table';
+let hasData = false;
+
+// ==================== 地图 ====================
+function initMap() {
+  map = L.map('map', {
+    zoomControl: true, zoomSnap: 0.5, zoomDelta: 0.5,
+    wheelPxPerZoomLevel: 120, minZoom: 2, maxZoom: 19
+  }).setView([22.5431, 114.0579], 13);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap', maxZoom: 19
+  }).addTo(map);
+  setTimeout(() => map.invalidateSize(), 300);
+}
+initMap();
+window.addEventListener('resize', () => map.invalidateSize());
+
+// ==================== NMEA 坐标转换 ====================
+function nmeaToDecimal(coord, direction) {
+  const str = coord.replace(/\0/g, '').trim();
+  if (!str || isNaN(parseFloat(str))) return null;
+  let degrees, minutes;
+  if (direction === 'N' || direction === 'S') {
+    degrees = parseInt(str.substring(0, 2));
+    minutes = parseFloat(str.substring(2));
+  } else {
+    degrees = parseInt(str.substring(0, 3));
+    minutes = parseFloat(str.substring(3));
+  }
+  let decimal = degrees + minutes / 60;
+  if (direction === 'S' || direction === 'W') decimal = -decimal;
+  return decimal;
+}
+
+// ==================== 二进制解析 ====================
+function parseGpsLog(arrayBuffer) {
+  const bytes = new Uint8Array(arrayBuffer);
+  const RECORD_SIZE = 41;
+  const count = Math.floor(bytes.length / RECORD_SIZE);
+  const results = [];
+  for (let i = 0; i < count; i++) {
+    const off = i * RECORD_SIZE;
+    const rd = (s, l) => { let r=''; for(let j=0;j<l;j++){const c=bytes[off+s+j]; if(c===0)break; r+=String.fromCharCode(c);} return r; };
+    const state = rd(0,1), timestamp = rd(1,6), calendar = rd(7,6);
+    const hemisphere = rd(13,1), latCoord = rd(14,9), meridian = rd(23,1);
+    const lonCoord = rd(24,10), velocity = rd(34,3), bearing = rd(37,3);
+    const lat = nmeaToDecimal(latCoord, hemisphere);
+    const lon = nmeaToDecimal(lonCoord, meridian);
+    let dateTimeStr = '';
+    if (calendar && timestamp) {
+      dateTimeStr = `20${calendar.substring(4,2)}-${calendar.substring(2,4)}-${calendar.substring(0,2)} ${timestamp.substring(0,2)}:${timestamp.substring(2,4)}:${timestamp.substring(4,6)}`;
+    }
+    results.push({ index:i+1, state, dateTime:dateTimeStr, lat, lon, speed:velocity, bearing, valid: state==='A' && lat!==null && lon!==null });
+  }
+  return results;
+}
+
+// ==================== 文件处理 ====================
+function handleFile(file) {
+  if (!file) return;
+  document.getElementById('fileName').textContent = file.name;
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    records = parseGpsLog(e.target.result);
+    renderData();
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+// ==================== 渲染 ====================
+function renderData() {
+  const validRecords = records.filter(r => r.valid);
+  const invalidCount = records.length - validRecords.length;
+
+  document.getElementById('stats').innerHTML =
+    `共 <span>${records.length}</span> 条 | ` +
+    `有效 <span style="color:#4ecca3">${validRecords.length}</span> | ` +
+    `无效 <span style="color:#e94560">${invalidCount}</span>`;
+  document.getElementById('btnClear').style.display = 'inline-block';
+
+  markers.forEach(m => map.removeLayer(m));
+  markers = [];
+  if (trackLine) map.removeLayer(trackLine);
+
+  if (validRecords.length === 0) {
+    hasData = false;
+    showEmpty('⚠️', '没有有效的 GPS 定位记录');
+    return;
+  }
+  hasData = true;
+
+  const latlngs = validRecords.map(r => [r.lat, r.lon]);
+  trackLine = L.polyline(latlngs, { color: '#e94560', weight: 4, opacity: 0.9 }).addTo(map);
+  const first = validRecords[0], last = validRecords[validRecords.length - 1];
+
+  // 起点
+  markers.push(L.circleMarker([first.lat, first.lon], {
+    radius: 8, color: '#4ecca3', fillColor: '#4ecca3', fillOpacity: 1, weight: 2
+  }).addTo(map).bindPopup(`<b>起点</b><br>${first.dateTime}<br>纬度: ${first.lat.toFixed(6)}<br>经度: ${first.lon.toFixed(6)}<br>速度: ${first.speed} 节`));
+
+  // 中间点：每隔一定间距打一个点，避免拥挤
+  const step = Math.max(1, Math.floor(validRecords.length / 15));
+  for (let i = step; i < validRecords.length - 1; i += step) {
+    const r = validRecords[i];
+    markers.push(L.circleMarker([r.lat, r.lon], {
+      radius: 4, color: '#5b8def', fillColor: '#5b8def', fillOpacity: 0.9, weight: 1
+    }).addTo(map).bindPopup(`<b>#${r.index}</b><br>${r.dateTime}<br>纬度: ${r.lat.toFixed(6)}<br>经度: ${r.lon.toFixed(6)}<br>速度: ${r.speed} 节<br>航向: ${r.bearing}°`));
+  }
+
+  // 终点
+  markers.push(L.circleMarker([last.lat, last.lon], {
+    radius: 8, color: '#e94560', fillColor: '#e94560', fillOpacity: 1, weight: 2
+  }).addTo(map).bindPopup(`<b>终点</b><br>${last.dateTime}<br>纬度: ${last.lat.toFixed(6)}<br>经度: ${last.lon.toFixed(6)}<br>速度: ${last.speed} 节`));
+  map.fitBounds(trackLine.getBounds(), { padding: [30, 30] });
+
+  // 直接渲染当前标签页
+  renderCurrentTab(validRecords, invalidCount);
+}
+
+function renderCurrentTab(validRecords, invalidCount) {
+  const el = document.getElementById('tabContent');
+  if (currentTab === 'table') {
+    let html = '<div class="panel-view"><table><thead><tr><th>#</th><th>状态</th><th>时间</th><th>纬度</th><th>经度</th><th>速度</th><th>航向</th></tr></thead><tbody>';
+    records.forEach((r, i) => {
+      const cls = r.valid ? '' : ' style="opacity:0.4"';
+      const sc = r.state === 'A' ? 'status-valid' : 'status-invalid';
+      html += `<tr${cls}><td>${r.index}</td><td class="${sc}">${r.state}</td><td>${r.dateTime||'-'}</td><td>${r.lat!==null?r.lat.toFixed(6):'-'}</td><td>${r.lon!==null?r.lon.toFixed(6):'-'}</td><td>${r.speed} kn</td><td>${r.bearing}°</td></tr>`;
+    });
+    html += '</tbody></table></div>';
+    el.innerHTML = html;
+  } else {
+    let totalDist = 0;
+    for (let i = 1; i < validRecords.length; i++) totalDist += haversine(validRecords[i-1].lat, validRecords[i-1].lon, validRecords[i].lat, validRecords[i].lon);
+    const speeds = validRecords.map(r => parseInt(r.speed)||0);
+    const avgSpeed = speeds.reduce((a,b)=>a+b,0)/speeds.length;
+    const maxSpeed = Math.max(...speeds);
+    const first = validRecords[0], last = validRecords[validRecords.length-1];
+    const dur = validRecords.length * 5, min = Math.floor(dur/60), sec = dur%60;
+    let html = '<div class="panel-view"><div class="info-content">';
+    html += row('记录总数', `${records.length} 条`);
+    html += row('有效记录', `${validRecords.length} 条`, '#4ecca3');
+    html += row('无效记录', `${invalidCount} 条`, '#e94560');
+    html += row('文件大小', `${(records.length*41/1024).toFixed(1)} KB`);
+    html += '<hr style="border-color:#0f3460;margin:12px 0">';
+    html += row('起始时间', first.dateTime);
+    html += row('结束时间', last.dateTime);
+    html += row('记录时长', `约 ${min} 分 ${sec} 秒`);
+    html += '<hr style="border-color:#0f3460;margin:12px 0">';
+    html += row('总距离', totalDist>1000?(totalDist/1000).toFixed(2)+' km':totalDist.toFixed(0)+' m');
+    html += row('平均速度', `${avgSpeed.toFixed(1)} 节`);
+    html += row('最大速度', `${maxSpeed} 节`);
+    html += '<hr style="border-color:#0f3460;margin:12px 0">';
+    html += row('起点坐标', `${first.lat.toFixed(6)}, ${first.lon.toFixed(6)}`);
+    html += row('终点坐标', `${last.lat.toFixed(6)}, ${last.lon.toFixed(6)}`);
+    html += '</div></div>';
+    el.innerHTML = html;
+  }
+}
+
+function row(label, value, color) {
+  return `<div><span class="label">${label}：</span><span class="value"${color?` style="color:${color}"`:''}>${value}</span></div>`;
+}
+
+function showEmpty(icon, text) {
+  document.getElementById('tabContent').innerHTML =
+    `<div class="empty-view"><div class="icon">${icon}</div><p>${text}</p></div>`;
+}
+
+// ==================== 标签切换 ====================
+function switchTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll('.panel-tab').forEach(t => t.classList.remove('active'));
+  document.querySelector(`[data-tab="${tab}"]`).classList.add('active');
+  if (!hasData) return;
+  const validRecords = records.filter(r => r.valid);
+  const invalidCount = records.length - validRecords.length;
+  renderCurrentTab(validRecords, invalidCount);
+}
+
+// ==================== 清除 ====================
+function clearData() {
+  records = []; hasData = false; currentTab = 'table';
+  markers.forEach(m => map.removeLayer(m)); markers = [];
+  if (trackLine) map.removeLayer(trackLine);
+  document.getElementById('stats').textContent = '';
+  document.getElementById('fileName').textContent = '';
+  document.getElementById('btnClear').style.display = 'none';
+  document.querySelectorAll('.panel-tab').forEach(t => t.classList.remove('active'));
+  document.querySelector('[data-tab="table"]').classList.add('active');
+  showEmpty('', '导入 gpslog.dat 文件开始解析');
+}
+
+// ==================== Haversine ====================
+function haversine(lat1, lon1, lat2, lon2) {
+  const R = 6371000, toRad = x => x * Math.PI / 180;
+  const dLat = toRad(lat2-lat1), dLon = toRad(lon2-lon1);
+  const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+</script>
+</body>
+</html>
